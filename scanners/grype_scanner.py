@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -17,9 +18,12 @@ class GrypeScanner:
             scan_date=datetime.utcnow().isoformat(),
         )
 
+        is_local = os.path.isdir(repo)
+        target = f"dir:{repo}" if is_local else repo
+
         try:
             proc = subprocess.run(
-                [self.binary, repo, "-o", "json"],
+                [self.binary, target, "-o", "json", "--quiet"],
                 capture_output=True,
                 text=True,
                 timeout=600,

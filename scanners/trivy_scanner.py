@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -17,9 +18,12 @@ class TrivyScanner:
             scan_date=datetime.utcnow().isoformat(),
         )
 
+        is_local = os.path.isdir(repo)
+        cmd = [self.binary, "fs" if is_local else "repo", "--format", "json", "--quiet", repo]
+
         try:
             proc = subprocess.run(
-                [self.binary, "repo", "--format", "json", repo],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=600,

@@ -1,0 +1,15 @@
+git:
+  tokens:
+    github.com: ""
+    gitlab.com: ""
+
+repositories:
+  - url: https://github.com/expressjs/express
+    branch: master
+    scan_mode: local
+
+  - url: https://github.com/lodash/lodash
+
+  - url: https://github.com/axios/axios
+    branch: v1.x
+    scan_mode: local

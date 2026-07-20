@@ -1,6 +1,7 @@
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.venv/
+.repos/
 reports/
-
-# Local outputs
-reports/
+reports_*/

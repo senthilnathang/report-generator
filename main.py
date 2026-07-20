@@ -5,6 +5,7 @@ from pathlib import Path
 
 from scanners import TrivyScanner, GrypeScanner, SnykScanner
 from reporters import ExcelReporter, JsonReporter, PdfReporter
+from repo_manager import RepoManager
 
 SCANNER_MAP = {
     "trivy": TrivyScanner,
@@ -63,6 +64,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=4,
         help="Parallel scan jobs (default: 4)",
     )
+    p.add_argument(
+        "-l", "--local",
+        action="store_true",
+        help="Clone/fetch repos locally before scanning (uses config.yaml)",
+    )
+    p.add_argument(
+        "-c", "--config",
+        default="config.yaml",
+        help="Path to YAML config file (default: config.yaml)",
+    )
+    p.add_argument(
+        "--clone-dir",
+        default=".repos",
+        help="Directory for cloned repos (default: .repos)",
+    )
     return p.parse_args(argv)
 
 
@@ -73,34 +89,43 @@ def main(argv: list[str] | None = None) -> None:
         print(f"error: repo list not found: {args.input}", file=sys.stderr)
         sys.exit(1)
 
-    repos = read_repo_list(args.input)
-    if not repos:
+    repo_urls = read_repo_list(args.input)
+    if not repo_urls:
         print("error: no repositories found in list", file=sys.stderr)
         sys.exit(1)
+
+    if args.local:
+        print("preparing local repositories...")
+        mgr = RepoManager(config_path=args.config, clone_dir=args.clone_dir)
+        repo_map = mgr.prepare_repos(repo_urls)
+        scan_targets = list(repo_map.values())
+    else:
+        repo_map = {u: u for u in repo_urls}
+        scan_targets = repo_urls
 
     scanners = [SCANNER_MAP[name]() for name in args.scanners]
     reporters = [REPORTER_MAP[name](output_dir=args.output_dir) for name in args.formats]
 
-    print(f"repositories: {len(repos)}")
+    print(f"scan targets: {len(scan_targets)}")
     print(f"scanners: {', '.join(args.scanners)}")
     print(f"formats: {', '.join(args.formats)}")
     print(f"output dir: {args.output_dir}")
     print()
 
     all_results = []
-    total_scans = len(repos) * len(scanners)
+    total_scans = len(scan_targets) * len(scanners)
     completed = 0
     failed = 0
 
     with ThreadPoolExecutor(max_workers=args.jobs) as executor:
         futures = {}
-        for repo in repos:
+        for target in scan_targets:
             for scanner in scanners:
-                fut = executor.submit(scanner.scan, repo)
-                futures[fut] = (repo, scanner.__class__.__name__)
+                fut = executor.submit(scanner.scan, target)
+                futures[fut] = (target, scanner.__class__.__name__)
 
         for fut in as_completed(futures):
-            repo, scanner_name = futures[fut]
+            target, scanner_name = futures[fut]
             completed += 1
             try:
                 result = fut.result()
@@ -111,10 +136,10 @@ def main(argv: list[str] | None = None) -> None:
                 if err_count:
                     status = f"errors({err_count})"
                     failed += 1
-                print(f"[{completed}/{total_scans}] {repo} | {scanner_name} | {vuln_count} vulns | {status}")
+                print(f"[{completed}/{total_scans}] {target} | {scanner_name} | {vuln_count} vulns | {status}")
             except Exception as e:
                 failed += 1
-                print(f"[{completed}/{total_scans}] {repo} | {scanner_name} | error: {e}")
+                print(f"[{completed}/{total_scans}] {target} | {scanner_name} | error: {e}")
 
     print()
     total_vulns = sum(len(r.vulnerabilities) for r in all_results)

@@ -1,7 +1,9 @@
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from models import ScanResult, Vulnerability
 
@@ -17,13 +19,25 @@ class SnykScanner:
             scan_date=datetime.utcnow().isoformat(),
         )
 
+        is_local = os.path.isdir(repo)
+
         try:
-            proc = subprocess.run(
-                [self.binary, "test", f"--remote-repo-url={repo}", "--json"],
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
+            if is_local:
+                proc = subprocess.run(
+                    [self.binary, "test", "--json"],
+                    cwd=repo,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+            else:
+                proc = subprocess.run(
+                    [self.binary, "test", f"--remote-repo-url={repo}", "--json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+
             stdout = proc.stdout.strip()
             if not stdout:
                 result.errors.append(proc.stderr.strip() or "empty output from snyk")
