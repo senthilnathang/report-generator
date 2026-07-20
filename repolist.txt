@@ -1,0 +1,5 @@
+# List of repositories to scan (one per line)
+# Supports GitHub URLs, local paths, etc.
+https://github.com/expressjs/express
+https://github.com/lodash/lodash
+https://github.com/axios/axios
