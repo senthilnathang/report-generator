@@ -1,0 +1,85 @@
+stages:
+  - scan
+  - report
+
+variables:
+  PYTHON_VERSION: "3.12"
+  TRIVY_VERSION: "0.68.1"
+  GRYPE_VERSION: "0.90.0"
+  SCANNERS: "trivy,grype"
+  FAIL_ON: "high"
+  REPORTS_DIR: "reports/ci-${CI_PIPELINE_ID}"
+
+.image-py: &image-py
+  image: python:${PYTHON_VERSION}-slim
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends curl git ca-certificates
+    - pip install -r requirements.txt
+    - curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v${TRIVY_VERSION}
+    - curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin v${GRYPE_VERSION}
+
+scan:
+  <<: *image-py
+  stage: scan
+  timeout: 30 minutes
+  artifacts:
+    paths:
+      - ${REPORTS_DIR}/
+    reports:
+      junit: ${REPORTS_DIR}/vulnerability_report.json
+    expire_in: 30 days
+  script:
+    # Build config from CI env
+    - |
+      cat > config.yaml << 'EOF'
+      git:
+        tokens:
+          github.com: '${GH_TOKEN}'
+          gitlab.com: '${GL_TOKEN}'
+      repositories:
+        - url: ${CI_REPOSITORY_URL}
+          branch: ${CI_COMMIT_BRANCH}
+          scan_mode: local
+      EOF
+    - echo "${CI_REPOSITORY_URL}" > repolist.txt
+    - |
+      python main.py \
+        --local --sync --history \
+        -s $(echo ${SCANNERS} | tr ',' ' ') \
+        -f json html sarif \
+        --fail-on ${FAIL_ON} \
+        -o ${REPORTS_DIR}
+
+report:
+  stage: report
+  needs: [scan]
+  image: python:${PYTHON_VERSION}-slim
+  script:
+    - echo "=== Vulnerability Summary ==="
+    - |
+      python3 << 'PYEOF'
+      import json, glob, sys
+      import os
+      reports_dir = os.environ.get('REPORTS_DIR', 'reports')
+      files = glob.glob(f'{reports_dir}/vulnerability_report.json')
+      if not files:
+          print('No report found')
+          sys.exit(0)
+      with open(files[0]) as f:
+          data = json.load(f)
+      crit = sum(r.get('summary',{}).get('CRITICAL',0) for r in data)
+      high = sum(r.get('summary',{}).get('HIGH',0) for r in data)
+      med  = sum(r.get('summary',{}).get('MEDIUM',0) for r in data)
+      low  = sum(r.get('summary',{}).get('LOW',0) for r in data)
+      total = sum(len(r.get('vulnerabilities',[])) for r in data)
+      scanners = set(r.get('scanner','') for r in data)
+      print(f'Scanners: {\", \".join(sorted(scanners))}')
+      print(f'Critical: {crit} | High: {high} | Medium: {med} | Low: {low} | Total: {total}')
+      PYEOF
+  artifacts:
+    paths:
+      - ${REPORTS_DIR}/
+    expire_in: 90 days
+  only:
+    - main
+    - master

@@ -1,0 +1,152 @@
+name: vuln-scan
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    - cron: '0 6 * * 1'  # every Monday 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      scanners:
+        description: 'Scanners to run (comma-separated)'
+        required: false
+        default: 'trivy,grype'
+      fail_on:
+        description: 'Fail on severity (critical, high, medium, low)'
+        required: false
+        default: 'high'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.12'
+  TRIVY_VERSION: '0.68.1'
+  GRYPE_VERSION: '0.90.0'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v${{ env.TRIVY_VERSION }}
+
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin v${{ env.GRYPE_VERSION }}
+
+      - name: Install Snyk
+        if: ${{ contains(github.event.inputs.scanners || 'trivy,grype', 'snyk') }}
+        run: |
+          curl -L https://static.snyk.io/cli/latest/snyk-linux -o /usr/local/bin/snyk
+          chmod +x /usr/local/bin/snyk
+          snyk auth ${{ secrets.SNYK_TOKEN }}
+
+      - name: Create config.yaml
+        run: |
+          cat > config.yaml << 'EOF'
+          git:
+            tokens:
+              github.com: '${{ secrets.GH_TOKEN }}'
+              gitlab.com: '${{ secrets.GL_TOKEN }}'
+          repositories:
+            - url: https://github.com/${{ github.repository }}
+              branch: ${{ github.head_ref || github.ref_name }}
+              scan_mode: local
+          EOF
+
+      - name: Update repolist.txt
+        run: |
+          echo "https://github.com/${{ github.repository }}" > repolist.txt
+
+      - name: Run vulnerability scan
+        id: scan
+        continue-on-error: true
+        run: |
+          SCANNERS="${{ github.event.inputs.scanners || 'trivy,grype' }}"
+          FAIL_ON="${{ github.event.inputs.fail_on || 'high' }}"
+          python main.py \
+            --local --sync --history \
+            -s $(echo $SCANNERS | tr ',' ' ') \
+            -f json html sarif \
+            --fail-on $FAIL_ON \
+            -o reports/ci-${{ github.run_id }}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-reports-${{ github.run_id }}
+          path: reports/ci-${{ github.run_id }}/
+          retention-days: 30
+
+      - name: PR comment with results
+        if: ${{ github.event_name == 'pull_request' && always() }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const reportsDir = `reports/ci-${{ github.run_id }}`;
+            let summary = '## Vulnerability Scan Results\n\n';
+            const jsonPath = path.join(reportsDir, 'vulnerability_report.json');
+            if (fs.existsSync(jsonPath)) {
+              const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+              let total = 0, critical = 0, high = 0, medium = 0, low = 0;
+              let scanners = new Set();
+              for (const r of data) {
+                scanners.add(r.scanner);
+                total += r.vulnerabilities.length;
+                critical += r.summary?.CRITICAL || 0;
+                high += r.summary?.HIGH || 0;
+                medium += r.summary?.MEDIUM || 0;
+                low += r.summary?.LOW || 0;
+              }
+              summary += `| Severity | Count |\n| --- | --- |\n`;
+              summary += `| 🔴 Critical | ${critical} |\n`;
+              summary += `| 🟠 High | ${high} |\n`;
+              summary += `| 🟡 Medium | ${medium} |\n`;
+              summary += `| 🟢 Low | ${low} |\n`;
+              summary += `| **Total** | **${total}** |\n\n`;
+              summary += `Scanners: ${[...scanners].join(', ')}\n\n`;
+              summary += `_Reports uploaded as artifact: scan-reports-${{ github.run_id }}_\n`;
+            } else {
+              summary += 'Scan completed but no results file found.\n';
+            }
+            const exitCode = ${{ steps.scan.outcome == 'success' && '0' || '1' }};
+            if (exitCode !== 0) {
+              summary += '\n⚠️ **Policy violation: scan failed --fail-on threshold**\n';
+            }
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+      - name: Fail on policy violation
+        if: ${{ steps.scan.outcome == 'failure' }}
+        run: exit 1
