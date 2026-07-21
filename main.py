@@ -3,9 +3,13 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from tqdm import tqdm
+
 from scanners import TrivyScanner, GrypeScanner, SnykScanner
 from reporters import ExcelReporter, JsonReporter, PdfReporter
+from reporters.sbom_reporter import SbomReporter
 from repo_manager import RepoManager
+from scan_history import ScanHistory
 
 SCANNER_MAP = {
     "trivy": TrivyScanner,
@@ -34,56 +38,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Multi-scanner vulnerability scanner for repositories",
     )
-    p.add_argument(
-        "-i", "--input",
-        default="repolist.txt",
-        help="Path to repo list file (default: repolist.txt)",
-    )
-    p.add_argument(
-        "-s", "--scanners",
-        nargs="+",
-        choices=list(SCANNER_MAP.keys()),
-        default=["trivy"],
-        help="Scanners to run (default: trivy)",
-    )
-    p.add_argument(
-        "-f", "--formats",
-        nargs="+",
-        choices=list(REPORTER_MAP.keys()),
-        default=["json"],
-        help="Report output formats (default: json)",
-    )
-    p.add_argument(
-        "-o", "--output-dir",
-        default="reports",
-        help="Output directory for reports (default: reports)",
-    )
-    p.add_argument(
-        "-j", "--jobs",
-        type=int,
-        default=4,
-        help="Parallel scan jobs (default: 4)",
-    )
-    p.add_argument(
-        "-l", "--local",
-        action="store_true",
-        help="Clone/fetch repos locally before scanning (uses config.yaml)",
-    )
-    p.add_argument(
-        "-c", "--config",
-        default="config.yaml",
-        help="Path to YAML config file (default: config.yaml)",
-    )
-    p.add_argument(
-        "--clone-dir",
-        default=".repos",
-        help="Directory for cloned repos (default: .repos)",
-    )
-    p.add_argument(
-        "--sync",
-        action="store_true",
-        help="Update config.yaml with latest commit SHAs for each repo before scanning",
-    )
+    p.add_argument("-i", "--input", default="repolist.txt",
+                    help="Path to repo list file (default: repolist.txt)")
+    p.add_argument("-s", "--scanners", nargs="+",
+                    choices=list(SCANNER_MAP.keys()), default=["trivy"],
+                    help="Scanners to run (default: trivy)")
+    p.add_argument("-f", "--formats", nargs="+",
+                    choices=list(REPORTER_MAP.keys()), default=["json"],
+                    help="Report output formats (default: json)")
+    p.add_argument("-o", "--output-dir", default="reports",
+                    help="Output directory for reports (default: reports)")
+    p.add_argument("-j", "--jobs", type=int, default=4,
+                    help="Parallel scan jobs (default: 4)")
+    p.add_argument("-l", "--local", action="store_true",
+                    help="Clone/fetch repos locally before scanning (uses config.yaml)")
+    p.add_argument("-c", "--config", default="config.yaml",
+                    help="Path to YAML config file (default: config.yaml)")
+    p.add_argument("--clone-dir", default=".repos",
+                    help="Directory for cloned repos (default: .repos)")
+    p.add_argument("--sync", action="store_true",
+                    help="Update config.yaml with latest commit SHAs before scanning")
+    p.add_argument("--history", action="store_true",
+                    help="Record scan results in SQLite history database")
+    p.add_argument("--history-db", default="reports/scan_history.db",
+                    help="Path to scan history database (default: reports/scan_history.db)")
+    p.add_argument("--skip-scanned", action="store_true",
+                    help="Skip targets already scanned at the same commit (requires --history)")
+    p.add_argument("--sbom", choices=["cyclonedx", "spdx"], const="cyclonedx", nargs="?",
+                    help="Generate SBOM using Trivy (cyclonedx or spdx)")
     return p.parse_args(argv)
 
 
@@ -114,30 +96,41 @@ def main(argv: list[str] | None = None) -> None:
         repo_map = {u: u for u in repo_urls}
         scan_targets = repo_urls
 
+    history: ScanHistory | None = None
+    if args.history:
+        history = ScanHistory(db_path=args.history_db)
+
     scanners = [SCANNER_MAP[name]() for name in args.scanners]
     reporters = [REPORTER_MAP[name](output_dir=args.output_dir) for name in args.formats]
 
     print(f"scan targets: {len(scan_targets)}")
     print(f"scanners: {', '.join(args.scanners)}")
-    print(f"formats: {', '.join(args.formats)}")
+    if args.sbom:
+        print(f"sbom: {args.sbom}")
     print(f"output dir: {args.output_dir}")
     print()
 
     all_results = []
     total_scans = len(scan_targets) * len(scanners)
-    completed = 0
-    failed = 0
+    skipped = 0
 
     with ThreadPoolExecutor(max_workers=args.jobs) as executor:
         futures = {}
         for target in scan_targets:
             for scanner in scanners:
+                if args.skip_scanned and history:
+                    repo_url = next((u for u, p in repo_map.items() if p == target), target)
+                    config = mgr.get_config(repo_url)
+                    commit_sha = config.get("commit", "")
+                    if commit_sha and history.was_commit_scanned(repo_url, commit_sha, scanner.__class__.__name__.lower().replace("scanner", "")):
+                        skipped += 1
+                        continue
                 fut = executor.submit(scanner.scan, target)
-                futures[fut] = (target, scanner.__class__.__name__)
+                futures[fut] = (target, scanner, repo_map)
 
+        progress = tqdm(total=total_scans - skipped, unit="scan", desc="scanning")
         for fut in as_completed(futures):
-            target, scanner_name = futures[fut]
-            completed += 1
+            target, scanner, rmap = futures[fut]
             try:
                 result = fut.result()
                 all_results.append(result)
@@ -146,22 +139,50 @@ def main(argv: list[str] | None = None) -> None:
                 status = "ok"
                 if err_count:
                     status = f"errors({err_count})"
-                    failed += 1
-                print(f"[{completed}/{total_scans}] {target} | {scanner_name} | {vuln_count} vulns | {status}")
-            except Exception as e:
-                failed += 1
-                print(f"[{completed}/{total_scans}] {target} | {scanner_name} | error: {e}")
+                progress.set_postfix(vulns=vuln_count, status=status)
+                progress.update(1)
 
+                if history:
+                    repo_url = next((u for u, p in rmap.items() if p == target), target)
+                    config = mgr.get_config(repo_url)
+                    s = result.summary
+                    history.record_scan(
+                        repo_url=repo_url,
+                        branch=config.get("branch", ""),
+                        commit_sha=config.get("commit", ""),
+                        scanner=result.scanner,
+                        scan_date=result.scan_date,
+                        vulns=result.vulnerabilities,
+                        summary=s,
+                        status=status,
+                    )
+            except Exception as e:
+                progress.set_postfix(error=str(e))
+                progress.update(1)
+
+        progress.close()
+
+    if skipped:
+        print(f"skipped: {skipped} (already scanned at same commit)")
     print()
     total_vulns = sum(len(r.vulnerabilities) for r in all_results)
+    failed = sum(1 for r in all_results if r.errors)
 
     for reporter in reporters:
         name = reporter.__class__.__name__.replace("Reporter", "").lower()
         out = reporter.generate(all_results, name="vulnerability_report")
         print(f"report ({name}): {out}")
 
+    if args.sbom and args.local:
+        sbom_gen = SbomReporter(output_dir=args.output_dir)
+        for target in scan_targets:
+            if Path(target).is_dir():
+                out = sbom_gen.generate_for_target(target, name=f"vulnerability_report-{Path(target).name}", fmt=args.sbom)
+                if out:
+                    print(f"sbom ({args.sbom}): {out}")
+
     print()
-    print(f"summary: {total_scans} scans, {total_vulns} vulnerabilities, {failed} failures")
+    print(f"summary: {total_scans - skipped} scans, {total_vulns} vulnerabilities, {failed} failures")
 
 
 if __name__ == "__main__":
