@@ -14,6 +14,7 @@ from reporters.diff_reporter import DiffReporter
 from reporters.license_reporter import LicenseReporter
 from reporters.dep_tree_reporter import DependencyTreeReporter
 from reporters.health_reporter import HealthReporter
+from reporters.outdated_reporter import OutdatedReporter
 from repo_manager import RepoManager
 from scan_history import ScanHistory
 
@@ -88,6 +89,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Interactively select branch for each repo from remote branches")
     p.add_argument("--health-report", action="store_true",
                     help="Generate repository health report (aggregates vulns, dep-tree, license)")
+    p.add_argument("--outdated", action="store_true",
+                    help="Check outdated dependencies against package registries (requires --dep-tree)")
     return p.parse_args(argv)
 
 
@@ -215,6 +218,8 @@ def main(argv: list[str] | None = None) -> None:
                 if out:
                     print(f"sbom ({args.sbom}): {out}")
 
+    dep_results_global = None
+
     if args.dep_tree and args.local:
         print("\nbuilding dependency tree...")
         dep_reporter = DependencyTreeReporter(output_dir=args.output_dir)
@@ -225,12 +230,24 @@ def main(argv: list[str] | None = None) -> None:
                 if dr:
                     dep_results.append(dr)
 
+        dep_results_global = dep_results
         if dep_results:
             dep_reporter.print_summary(dep_results)
             out_json = dep_reporter.generate(dep_results, name="dependency_tree")
             print(f"report (dep-tree json): {out_json}")
             out_csv = dep_reporter.generate_csv(dep_results, name="dependency_tree")
             print(f"report (dep-tree csv): {out_csv}")
+
+    if args.outdated:
+        if dep_results_global:
+            print("\nchecking outdated dependencies...")
+            outdated_rpt = OutdatedReporter(output_dir=args.output_dir)
+            out = outdated_rpt.generate(dep_results_global, name="outdated_report")
+            report_data = json.loads(Path(out).read_text())
+            outdated_rpt.print_summary(report_data)
+            print(f"report (outdated html): {Path(out).with_suffix('.html')}")
+        else:
+            print("--outdated requires --dep-tree data (use --dep-tree)")
 
     license_violations = False
     if args.license and args.local:
