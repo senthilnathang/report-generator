@@ -1,23 +1,33 @@
 # Report Generator
 
-Multi-scanner vulnerability scanning pipeline for GitHub repositories. Runs **Trivy**, **Grype**, and **Snyk** in parallel and consolidates results into **Excel**, **JSON**, and **PDF** reports.
+Multi-scanner vulnerability scanning pipeline for GitHub repositories. Runs **Trivy**, **Grype**, and **Snyk** in parallel and consolidates results into **Excel**, **JSON**, and **PDF** reports. Includes an optional **Rust TUI** for interactive use.
 
 ## Architecture
 
 ```
+                    ┌──────────────────────────────────────────┐
+                    │           Rust TUI (scan-tui)            │
+                    │  ratatui + crossterm + tokio             │
+                    │  spawns main.py as subprocess            │
+                    └──────────────┬───────────────────────────┘
+                                   │
 repolist.txt ──> main.py ──> scanners/ ──> reporters/ ──> reports/
                     │            │               │
               config.yaml    trivy           excel
               (optional)     grype           json
                              snyk            pdf
+
+scan_history.py ──> SQLite history DB ──> diff reports
 ```
 
 | Layer | Directory | Description |
 |-------|-----------|-------------|
+| **TUI** | `tui/` | Rust terminal UI (ratatui 0.29, crossterm 0.28) |
 | **CLI** | `main.py` | Argparse entry point; dispatches scans and reports |
 | **Models** | `models.py` | `Vulnerability` / `ScanResult` dataclasses with severity rollup |
 | **Scanners** | `scanners/` | One module per tool; subprocesses the CLI, parses JSON output |
 | **Reporters** | `reporters/` | One module per format; transforms `ScanResult` into output files |
+| **History** | `scan_history.py` | SQLite persistence for scan runs and vulnerability tracking |
 | **Repo Manager** | `repo_manager.py` | Clones/fetches repos with token auth and branch checkout |
 | **Config** | `config.yaml` | Git tokens, per-repo branch/scan mode |
 
@@ -36,6 +46,8 @@ repolist.txt ──> main.py ──> scanners/ ──> reporters/ ──> report
 | **Excel** | `openpyxl` | Summary sheet (severity counts) + Details sheet (all vulns with severity coloring) |
 | **JSON** | built-in | Array of serialized `ScanResult` objects with auto-computed summary |
 | **PDF** | `reportlab` | Summary table + detailed findings table (landscape A4) |
+| **Diff** | built-in | New / fixed / unchanged vulnerability IDs between consecutive scan runs |
+| **SBOM** | Trivy CLI | CycloneDX or SPDX format via `trivy fs --format <cyclonedx\|spdx>` |
 
 ## Business Use Cases
 
@@ -52,13 +64,18 @@ repolist.txt ──> main.py ──> scanners/ ──> reporters/ ──> report
 - [Grype](https://github.com/anchore/grype) (`brew install grype` / `curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh`)
 - [Snyk](https://docs.snyk.io/snyk-cli) (`npm install -g snyk` / `curl -L https://static.snyk.io/cli/latest/snyk-linux -o snyk`)
 - Snyk requires authentication: `snyk auth`
+- Rust toolchain (for TUI): `rustc 1.75+`, `cargo` (install via [rustup](https://rustup.rs))
 
 ## Setup
 
 ```bash
+# Python
 python3 -m venv .venv
 source .venv/bin/activate
 pip install openpyxl reportlab pyyaml
+
+# Rust TUI (optional)
+cd tui && cargo build --release && cd ..
 ```
 
 ## Usage
@@ -72,7 +89,7 @@ https://github.com/lodash/lodash
 https://github.com/axios/axios
 ```
 
-### 2. Run scan
+### 2. Run scan (CLI)
 
 ```bash
 # Scan remotely with Trivy, output JSON
@@ -86,7 +103,29 @@ python main.py --local -s trivy -f excel
 
 # Custom input file and output directory
 python main.py -i my-org-repos.txt -s grype -f json pdf -o ./audit
+
+# Full pipeline: sync commits, record history, diff against last scan
+python main.py --local --sync --history --diff
 ```
+
+### 3. Run scan (TUI)
+
+```bash
+cd tui && cargo run
+```
+
+Keyboard shortcuts:
+
+| Key | Mode | Action |
+|-----|------|--------|
+| `Space` | Dashboard | Toggle selected scanner |
+| `f` | Dashboard | Toggle output format |
+| `d` | Dashboard | Toggle diff mode |
+| `Enter` | Dashboard | Start scan |
+| `Esc` | Scanning | Cancel scan |
+| `↑` / `↓` | Scanning | Scroll live log |
+| `q` | Any | Quit |
+| `r` | Results | Back to dashboard |
 
 ### Local scan mode
 
@@ -123,14 +162,23 @@ repositories:
 | `-l, --local` | — | Enable local clone mode |
 | `-c, --config` | `config.yaml` | YAML config for tokens and repo settings |
 | `--clone-dir` | `.repos` | Where to clone repos in `--local` mode |
+| `--sync` | — | Fetch latest commit SHAs from remotes and update config |
+| `--history` | — | Record scan results into a SQLite history database |
+| `--history-db` | `reports/scan_history.db` | Path to the history SQLite database |
+| `--diff` | — | Compare current results against last history entry |
+| `--skip-scanned` | — | Skip targets already scanned at the same commit |
+| `--sbom` | — | Generate CycloneDX SBOM via Trivy (requires `--local`) |
 
 ## Output
 
 ```
 reports/
-├── vulnerability_report.json   # Full structured data
-├── vulnerability_report.xlsx   # Summary + Details sheets
-└── vulnerability_report.pdf    # Landscape tables with severity
+├── vulnerability_report.json       # Full structured data
+├── vulnerability_report.xlsx       # Summary + Details sheets
+├── vulnerability_report.pdf        # Landscape tables with severity
+├── vulnerability_report-diff.json  # New/fixed/unchanged vulns
+├── vulnerability_report-*-sbom.*.json  # CycloneDX/SPDX SBOMs
+└── scan_history.db                 # SQLite scan history
 ```
 
 Console summary:
@@ -150,14 +198,27 @@ report (pdf): reports/vulnerability_report.pdf
 summary: 6 scans, 12 vulnerabilities, 0 failures
 ```
 
+Diff output:
+```
+axios/axios | trivy: 2 new, 0 fixed, 4 unchanged
+expressjs/express | trivy: 0 new, 3 fixed, 5 unchanged
+```
+
 ## Project Structure
 
 ```
 ├── main.py                  CLI orchestrator
 ├── models.py                Data models (Vulnerability, ScanResult)
 ├── repo_manager.py          Git clone/fetch with token auth
+├── scan_history.py          SQLite scan history and diff queries
 ├── config.yaml              Per-repo configuration
 ├── repolist.txt             Repo URL list
+├── tui/
+│   ├── Cargo.toml           Rust dependencies
+│   └── src/
+│       ├── main.rs          Terminal setup, event loop, key dispatch
+│       ├── app.rs           State machine, subprocess spawning, data models
+│       └── tui.rs           Ratatui rendering (dashboard, scanning, results)
 ├── scanners/
 │   ├── trivy_scanner.py     Trivy integration
 │   ├── grype_scanner.py     Grype integration
@@ -165,6 +226,8 @@ summary: 6 scans, 12 vulnerabilities, 0 failures
 ├── reporters/
 │   ├── excel_reporter.py    Excel (openpyxl)
 │   ├── json_reporter.py     JSON (built-in)
-│   └── pdf_reporter.py      PDF (reportlab)
+│   ├── pdf_reporter.py      PDF (reportlab)
+│   ├── diff_reporter.py     Diff against history
+│   └── sbom_reporter.py     CycloneDX/SPDX SBOM generation
 └── .gitignore
 ```
