@@ -5,3 +5,4 @@ __pycache__/
 .repos/
 reports/
 reports_*/
+tui/target/
