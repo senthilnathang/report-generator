@@ -82,6 +82,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="License policy rules: 'allow=MIT,Apache-2.0' or 'deny=GPL-3.0,AGPL-3.0'")
     p.add_argument("--dep-tree", action="store_true",
                     help="Export full dependency tree (all packages, not just vulnerable ones)")
+    p.add_argument("--select-branch", action="store_true",
+                    help="Interactively select branch for each repo from remote branches")
     return p.parse_args(argv)
 
 
@@ -103,6 +105,10 @@ def main(argv: list[str] | None = None) -> None:
         print("syncing commit SHAs from remote repositories...")
         mgr.update_config_with_commits(repo_urls)
         print()
+
+    if args.select_branch:
+        print("interactive branch selection...")
+        mgr.interactive_select_branches(repo_urls)
 
     if args.local:
         print("preparing local repositories...")

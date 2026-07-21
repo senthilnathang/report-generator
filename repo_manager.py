@@ -122,6 +122,100 @@ class RepoManager:
                 yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
             print(f"  config updated: {self.config_path}")
 
+    def list_remote_branches(self, repo_url: str) -> list[str]:
+        """Fetch all remote branch names via git ls-remote --heads."""
+        auth_url = self.authenticated_url(repo_url)
+        try:
+            proc = subprocess.run(
+                ["git", "ls-remote", "--heads", auth_url],
+                capture_output=True, text=True, timeout=30,
+            )
+            if proc.returncode != 0:
+                return []
+            branches = []
+            for line in proc.stdout.strip().split("\n"):
+                if not line.strip():
+                    continue
+                # format: <sha> refs/heads/<name>
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[1].startswith("refs/heads/"):
+                    branches.append(parts[1][len("refs/heads/"):])
+            return branches
+        except Exception:
+            return []
+
+    def interactive_select_branches(self, repo_urls: list[str]) -> None:
+        """Show interactive numbered menu to pick a branch for each repo."""
+        self.load_config()
+        if not self.config_path.exists():
+            print(f"error: config file not found: {self.config_path}")
+            return
+
+        with open(self.config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+
+        changed = False
+        for url in repo_urls:
+            repo_name = url.rstrip("/").split("/")[-1]
+            print(f"\n=== {repo_name} === ({url})")
+
+            branches = self.list_remote_branches(url)
+            if not branches:
+                print("  no branches found (skipping)")
+                continue
+
+            # show current branch
+            current = None
+            for entry in cfg.get("repositories", []):
+                if entry.get("url", "").rstrip("/") == url.rstrip("/"):
+                    current = entry.get("branch")
+                    break
+
+            if current:
+                print(f"  current branch: {current}")
+
+            print("  available branches:")
+            for i, b in enumerate(branches, 1):
+                marker = "  <-- current" if b == current else ""
+                print(f"    {i:3d}. {b}{marker}")
+
+            choice = input(f"  select branch [1-{len(branches)}, Enter=keep current]: ").strip()
+            if not choice:
+                print(f"  keeping: {current or 'default'}")
+                continue
+
+            try:
+                idx = int(choice) - 1
+                if idx < 0 or idx >= len(branches):
+                    print(f"  invalid choice (skipping)")
+                    continue
+                selected = branches[idx]
+                print(f"  selected: {selected}")
+
+                # update config
+                for entry in cfg.get("repositories", []):
+                    if entry.get("url", "").rstrip("/") == url.rstrip("/"):
+                        entry["branch"] = selected
+                        changed = True
+                        break
+                else:
+                    # repo not in config yet — add it
+                    cfg.setdefault("repositories", []).append({
+                        "url": url,
+                        "branch": selected,
+                        "scan_mode": "local",
+                    })
+                    changed = True
+
+            except ValueError:
+                print("  invalid input (skipping)")
+                continue
+
+        if changed:
+            with open(self.config_path, "w") as f:
+                yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+            print(f"\nconfig updated: {self.config_path}")
+
     def prepare_repos(self, repo_urls: list[str]) -> dict[str, str]:
         self.load_config()
         self.clone_dir.mkdir(parents=True, exist_ok=True)
