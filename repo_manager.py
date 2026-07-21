@@ -1,7 +1,5 @@
 import os
-import re
 import subprocess
-import sys
 from pathlib import Path
 
 import yaml
@@ -29,6 +27,7 @@ class RepoManager:
                 self.repo_configs[url.rstrip("/")] = {
                     "branch": entry.get("branch"),
                     "scan_mode": entry.get("scan_mode", "remote"),
+                    "commit": entry.get("commit", ""),
                 }
 
     def get_config(self, repo_url: str) -> dict:
@@ -69,16 +68,59 @@ class RepoManager:
             )
 
         if branch:
-            branch_path = repo_path / f".git/refs/heads/{branch}"
-            if not branch_path.exists():
-                print(f"  checking out: {branch}")
-                subprocess.run(
-                    ["git", "checkout", branch],
-                    cwd=str(repo_path),
-                    capture_output=True, text=True, timeout=60,
-                )
+            subprocess.run(
+                ["git", "checkout", branch],
+                cwd=str(repo_path),
+                capture_output=True, text=True, timeout=60,
+            )
 
         return str(repo_path)
+
+    def fetch_latest_commit(self, repo_url: str, branch: str | None = None) -> str | None:
+        ref = f"refs/heads/{branch}" if branch else "HEAD"
+        auth_url = self.authenticated_url(repo_url)
+        try:
+            proc = subprocess.run(
+                ["git", "ls-remote", auth_url, ref],
+                capture_output=True, text=True, timeout=30,
+            )
+            if proc.returncode != 0:
+                return None
+            parts = proc.stdout.strip().split()
+            return parts[0] if parts else None
+        except Exception:
+            return None
+
+    def update_config_with_commits(self, repo_urls: list[str]) -> None:
+        self.load_config()
+        if not self.config_path.exists():
+            return
+
+        with open(self.config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+
+        updated = False
+        for entry in cfg.get("repositories", []):
+            url = entry.get("url", "")
+            if url and url.rstrip("/") in [u.rstrip("/") for u in repo_urls]:
+                branch = entry.get("branch")
+                print(f"  fetching latest commit for {url}")
+                if branch:
+                    print(f"    branch: {branch}")
+                commit = self.fetch_latest_commit(url, branch)
+                if commit:
+                    old = entry.get("commit", "")
+                    entry["commit"] = commit
+                    updated = True
+                    status = "same" if old == commit else "updated"
+                    print(f"    commit: {commit} ({status})")
+                else:
+                    print(f"    commit: unable to fetch")
+
+        if updated:
+            with open(self.config_path, "w") as f:
+                yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+            print(f"  config updated: {self.config_path}")
 
     def prepare_repos(self, repo_urls: list[str]) -> dict[str, str]:
         self.load_config()

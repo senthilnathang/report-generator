@@ -1,15 +1,15 @@
 git:
   tokens:
-    github.com: ""
-    gitlab.com: ""
-
+    github.com: ''
+    gitlab.com: ''
 repositories:
-  - url: https://github.com/expressjs/express
-    branch: master
-    scan_mode: local
-
-  - url: https://github.com/lodash/lodash
-
-  - url: https://github.com/axios/axios
-    branch: v1.x
-    scan_mode: local
+- url: https://github.com/expressjs/express
+  branch: master
+  scan_mode: local
+  commit: ''
+- url: https://github.com/lodash/lodash
+  commit: ''
+- url: https://github.com/axios/axios
+  branch: v1.x
+  scan_mode: local
+  commit: c44f8d0a910df99486da9175584b99f56a94a73b

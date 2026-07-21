@@ -79,6 +79,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=".repos",
         help="Directory for cloned repos (default: .repos)",
     )
+    p.add_argument(
+        "--sync",
+        action="store_true",
+        help="Update config.yaml with latest commit SHAs for each repo before scanning",
+    )
     return p.parse_args(argv)
 
 
@@ -94,9 +99,15 @@ def main(argv: list[str] | None = None) -> None:
         print("error: no repositories found in list", file=sys.stderr)
         sys.exit(1)
 
+    mgr = RepoManager(config_path=args.config, clone_dir=args.clone_dir)
+
+    if args.sync:
+        print("syncing commit SHAs from remote repositories...")
+        mgr.update_config_with_commits(repo_urls)
+        print()
+
     if args.local:
         print("preparing local repositories...")
-        mgr = RepoManager(config_path=args.config, clone_dir=args.clone_dir)
         repo_map = mgr.prepare_repos(repo_urls)
         scan_targets = list(repo_map.values())
     else:
