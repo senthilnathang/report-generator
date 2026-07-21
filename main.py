@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -12,6 +13,7 @@ from reporters.sbom_reporter import SbomReporter
 from reporters.diff_reporter import DiffReporter
 from reporters.license_reporter import LicenseReporter
 from reporters.dep_tree_reporter import DependencyTreeReporter
+from reporters.health_reporter import HealthReporter
 from repo_manager import RepoManager
 from scan_history import ScanHistory
 
@@ -84,6 +86,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Export full dependency tree (all packages, not just vulnerable ones)")
     p.add_argument("--select-branch", action="store_true",
                     help="Interactively select branch for each repo from remote branches")
+    p.add_argument("--health-report", action="store_true",
+                    help="Generate repository health report (aggregates vulns, dep-tree, license)")
     return p.parse_args(argv)
 
 
@@ -269,6 +273,48 @@ def main(argv: list[str] | None = None) -> None:
 
     if license_violations:
         exit_code = 1
+
+    if args.health_report and all_results:
+        print("\ngenerating health report...")
+        dep_tree = None
+        lic_data = None
+
+        if args.dep_tree:
+            dep_tree = dep_results_global if hasattr(args, 'dep_results_global') else None
+        if dep_tree is None and args.local:
+            dep_rpt = DependencyTreeReporter(output_dir=args.output_dir)
+            dep_tree = []
+            for target in scan_targets:
+                if Path(target).is_dir():
+                    dr = dep_rpt.scan_target(target)
+                    if dr:
+                        dep_tree.append(dr)
+
+        if args.license:
+            lic_data = lic_results if 'lic_results' in dir() else None
+        if lic_data is None and args.local and not args.license:
+            from scanners.license_scanner import LicenseScanner
+            ls = LicenseScanner()
+            lic_data = []
+            for target in scan_targets:
+                if Path(target).is_dir():
+                    lr = ls.scan(target)
+                    if lr.licenses or lr.errors:
+                        lic_data.append({
+                            "repo": lr.repo,
+                            "licenses": [{"name": l.name, "severity": l.severity,
+                                          "package": l.package, "file_path": l.file_path,
+                                          "confidence": l.confidence, "link": l.link}
+                                         for l in lr.licenses],
+                            "errors": lr.errors,
+                            "policy_violations": [],
+                        })
+
+        health = HealthReporter(output_dir=args.output_dir)
+        out = health.generate(all_results, dep_tree, lic_data)
+        report_data = json.loads(Path(out).with_suffix('.json').read_text())
+        health.print_summary(report_data)
+        print(f"report (health html): {out}")
 
     if exit_code:
         sys.exit(exit_code)
