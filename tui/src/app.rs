@@ -137,8 +137,13 @@ pub struct App {
     pub completed_targets: usize,
     pub should_quit: bool,
     pub diff_enabled: bool,
+    pub dep_tree_enabled: bool,
+    pub license_enabled: bool,
+    pub health_report_enabled: bool,
+    pub outdated_enabled: bool,
+    pub fail_on_index: usize,
     pub log_scroll: usize,
-    pub scan_timeout_secs: u64,
+    pub     scan_timeout_secs: u64,
     scan_start: Option<std::time::Instant>,
     #[allow(dead_code)]
     pub list_index: usize,
@@ -147,6 +152,8 @@ pub struct App {
     log_rx: Option<mpsc::Receiver<String>>,
     child: Option<Child>,
 }
+
+pub const FAIL_ON_LEVELS: [&str; 5] = ["none", "critical", "high", "medium", "low"];
 
 impl App {
     pub fn new(project_root: &Path) -> Result<Self> {
@@ -171,6 +178,11 @@ impl App {
             completed_targets: 0,
             should_quit: false,
             diff_enabled: false,
+            dep_tree_enabled: false,
+            license_enabled: false,
+            health_report_enabled: false,
+            outdated_enabled: false,
+            fail_on_index: 0,
             log_scroll: 0,
             scan_timeout_secs: 600,
             scan_start: None,
@@ -232,6 +244,22 @@ impl App {
             .arg("--history");
         if self.diff_enabled {
             cmd.arg("--diff");
+        }
+        if self.dep_tree_enabled {
+            cmd.arg("--dep-tree");
+        }
+        if self.license_enabled {
+            cmd.arg("--license");
+        }
+        if self.health_report_enabled {
+            cmd.arg("--health-report");
+        }
+        if self.outdated_enabled {
+            cmd.arg("--outdated");
+        }
+        if self.fail_on_index > 0 {
+            cmd.arg("--fail-on");
+            cmd.arg(FAIL_ON_LEVELS[self.fail_on_index]);
         }
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())

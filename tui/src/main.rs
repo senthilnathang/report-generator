@@ -12,7 +12,7 @@ use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{App, Mode};
+use app::{App, FAIL_ON_LEVELS, Format, Mode, Scanner};
 
 const PARENT_ROOT: &str = "/opt/report-generator";
 
@@ -89,6 +89,26 @@ async fn handle_dashboard_key(app: &mut App, key: KeyCode) {
                 }
             }
         }
+        KeyCode::Up => {
+            let n = Scanner::ALL.len();
+            app.scanner_index = (app.scanner_index + n - 1) % n;
+            app.status_message = format!("scanner: {}", Scanner::ALL[app.scanner_index].as_str());
+        }
+        KeyCode::Down => {
+            let n = Scanner::ALL.len();
+            app.scanner_index = (app.scanner_index + 1) % n;
+            app.status_message = format!("scanner: {}", Scanner::ALL[app.scanner_index].as_str());
+        }
+        KeyCode::Right => {
+            let n = Format::ALL.len();
+            app.format_index = (app.format_index + 1) % n;
+            app.status_message = format!("format: {}", Format::ALL[app.format_index].as_str());
+        }
+        KeyCode::Left => {
+            let n = Format::ALL.len();
+            app.format_index = (app.format_index + n - 1) % n;
+            app.status_message = format!("format: {}", Format::ALL[app.format_index].as_str());
+        }
         KeyCode::Char(' ') => {
             app.toggle_scanner(app.scanner_index);
         }
@@ -97,11 +117,28 @@ async fn handle_dashboard_key(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('d') => {
             app.diff_enabled = !app.diff_enabled;
-            app.status_message = if app.diff_enabled {
-                "diff enabled".to_string()
-            } else {
-                "diff disabled".to_string()
-            };
+            app.status_message = if app.diff_enabled { "diff on" } else { "diff off" }.to_string();
+        }
+        KeyCode::Char('t') => {
+            app.dep_tree_enabled = !app.dep_tree_enabled;
+            app.status_message = if app.dep_tree_enabled { "dep-tree on" } else { "dep-tree off" }.to_string();
+        }
+        KeyCode::Char('l') => {
+            app.license_enabled = !app.license_enabled;
+            app.status_message = if app.license_enabled { "license scan on" } else { "license scan off" }.to_string();
+        }
+        KeyCode::Char('h') => {
+            app.health_report_enabled = !app.health_report_enabled;
+            app.status_message = if app.health_report_enabled { "health report on" } else { "health report off" }.to_string();
+        }
+        KeyCode::Char('o') => {
+            app.outdated_enabled = !app.outdated_enabled;
+            app.status_message = if app.outdated_enabled { "outdated check on" } else { "outdated check off" }.to_string();
+        }
+        KeyCode::Char('p') => {
+            let n = FAIL_ON_LEVELS.len();
+            app.fail_on_index = (app.fail_on_index + 1) % n;
+            app.status_message = format!("fail-on: {}", FAIL_ON_LEVELS[app.fail_on_index]);
         }
         _ => {}
     }

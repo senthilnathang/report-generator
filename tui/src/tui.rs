@@ -6,7 +6,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{App, Format, Mode, Scanner};
+use crate::app::{App, FAIL_ON_LEVELS, Format, Mode, Scanner};
 
 pub fn render(f: &mut Frame, app: &App) {
     match app.mode {
@@ -22,8 +22,9 @@ fn render_dashboard(f: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(1),
-            Constraint::Length(8),
-            Constraint::Length(5),
+            Constraint::Length(6),
+            Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Length(3),
         ])
         .split(f.area());
@@ -40,7 +41,8 @@ fn render_dashboard(f: &mut Frame, app: &App) {
     render_repo_list(f, app, chunks[1]);
     render_scanner_panel(f, app, chunks[2]);
     render_format_panel(f, app, chunks[3]);
-    render_footer(f, app, chunks[4]);
+    render_options_panel(f, app, chunks[4]);
+    render_footer(f, app, chunks[5]);
 }
 
 fn render_repo_list(f: &mut Frame, app: &App, area: Rect) {
@@ -67,16 +69,20 @@ fn render_repo_list(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_scanner_panel(f: &mut Frame, app: &App, area: Rect) {
     let mut cells = vec![];
-    for scanner in Scanner::ALL.iter() {
+    for (i, scanner) in Scanner::ALL.iter().enumerate() {
         let checked = app.scanners.contains(scanner);
         let prefix = if checked { "[x]" } else { "[ ]" };
-        let style = if checked {
+        let selected = i == app.scanner_index;
+        let mut style = if checked {
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
+        if selected {
+            style = style.bg(Color::DarkGray);
+        }
         cells.push(Paragraph::new(Line::from(vec![
-            Span::styled(format!(" {prefix} {}  ", scanner.as_str()), style),
+            Span::styled(format!("{prefix} {} ", scanner.as_str()), style),
         ])));
     }
 
@@ -89,7 +95,7 @@ fn render_scanner_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let block = Block::default()
-        .title(" Scanners (space to toggle) ")
+        .title(" Scanners (↑↓ navigate, SPACE toggle) ")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
     f.render_widget(block, area);
@@ -97,16 +103,20 @@ fn render_scanner_panel(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_format_panel(f: &mut Frame, app: &App, area: Rect) {
     let mut cells = vec![];
-    for fmt in Format::ALL.iter() {
+    for (i, fmt) in Format::ALL.iter().enumerate() {
         let checked = app.formats.contains(fmt);
         let prefix = if checked { "[x]" } else { "[ ]" };
-        let style = if checked {
+        let selected = i == app.format_index;
+        let mut style = if checked {
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
+        if selected {
+            style = style.bg(Color::DarkGray);
+        }
         cells.push(Paragraph::new(Line::from(vec![
-            Span::styled(format!(" {prefix} {}  ", fmt.as_str()), style),
+            Span::styled(format!("{prefix} {} ", fmt.as_str()), style),
         ])));
     }
 
@@ -120,7 +130,59 @@ fn render_format_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let block = Block::default()
-        .title(" Output Formats (f to toggle) ")
+        .title(" Output Formats (← → navigate, F toggle) ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded);
+    f.render_widget(block, area);
+}
+
+fn render_options_panel(f: &mut Frame, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .margin(1)
+        .split(area);
+
+    let opts = [
+        ("D", app.diff_enabled, "diff"),
+        ("T", app.dep_tree_enabled, "dep-tree"),
+        ("L", app.license_enabled, "license"),
+        ("H", app.health_report_enabled, "health"),
+        ("O", app.outdated_enabled, "outdated"),
+    ];
+    let inner = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(vec![Constraint::Ratio(1, 5); 5])
+        .split(chunks[0]);
+    for (i, (key, enabled, label)) in opts.iter().enumerate() {
+        let prefix = if *enabled { "[x]" } else { "[ ]" };
+        let style = if *enabled {
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let p = Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {prefix} {label} "), style),
+            Span::styled(format!("({key})"), Style::default().fg(Color::Cyan)),
+        ]));
+        f.render_widget(p, inner[i]);
+    }
+
+    let level = FAIL_ON_LEVELS[app.fail_on_index];
+    let fail_style = if app.fail_on_index > 0 {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let fail_text = Line::from(vec![
+        Span::styled(" Fail-on: ", Style::default().fg(Color::Cyan)),
+        Span::styled(format!("[{level}]"), fail_style),
+        Span::styled(" (P cycle) ", Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(Paragraph::new(fail_text), chunks[1]);
+
+    let block = Block::default()
+        .title(" Scan Options ")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
     f.render_widget(block, area);
@@ -131,13 +193,11 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::Dashboard => {
             let sc: Vec<&str> = app.scanners.iter().map(|s| s.as_str()).collect();
             let fm: Vec<&str> = app.formats.iter().map(|f| f.as_str()).collect();
-            let diff = if app.diff_enabled { " [DIFF ON]" } else { "" };
             format!(
-                " Enter: Scan ({} repos, scanners: {}, formats: {}){} | SPACE: scanner | F: format | D: diff toggle | Q: Quit ",
+                " Enter: Scan ({} repos, sc: {}, fmt: {}) | SPACE: scanner | F: format | DTLHO: toggles | Q: Quit ",
                 app.repos.len(),
                 sc.join(","),
                 fm.join(","),
-                diff,
             )
         }
         Mode::Scanning => " Esc: Cancel scan | Up/Down: Scroll log ".to_string(),
