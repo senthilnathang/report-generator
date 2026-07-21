@@ -48,6 +48,44 @@ class ScanHistory:
             )
             return cursor.fetchone()[0] > 0
 
+    def get_last_scan(self, repo_url: str, scanner: str, offset: int = 1) -> dict | None:
+        with sqlite3.connect(str(self.db_path)) as conn:
+            cursor = conn.execute(
+                """SELECT id, repo_url, branch, commit_sha, scanner, scan_date
+                   FROM scan_runs
+                   WHERE repo_url=? AND scanner=?
+                   ORDER BY id DESC LIMIT 1 OFFSET ?""",
+                (repo_url, scanner, offset),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0], "repo_url": row[1], "branch": row[2],
+                "commit_sha": row[3], "scanner": row[4], "scan_date": row[5],
+            }
+
+    def get_scan_vuln_ids(self, scan_run_id: int) -> set[str]:
+        with sqlite3.connect(str(self.db_path)) as conn:
+            cursor = conn.execute(
+                "SELECT vuln_id FROM vulnerabilities WHERE scan_run_id=?",
+                (scan_run_id,),
+            )
+            return {row[0] for row in cursor.fetchall()}
+
+    def get_scan_vulns(self, scan_run_id: int) -> list[dict]:
+        with sqlite3.connect(str(self.db_path)) as conn:
+            cursor = conn.execute(
+                """SELECT vuln_id, package, installed_version, fixed_version, severity, type
+                   FROM vulnerabilities WHERE scan_run_id=?""",
+                (scan_run_id,),
+            )
+            return [
+                {"id": r[0], "package": r[1], "installed_version": r[2],
+                 "fixed_version": r[3], "severity": r[4], "type": r[5]}
+                for r in cursor.fetchall()
+            ]
+
     def record_scan(
         self, repo_url: str, branch: str, commit_sha: str,
         scanner: str, scan_date: str, vulns: list,

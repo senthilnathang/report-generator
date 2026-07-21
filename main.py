@@ -8,6 +8,7 @@ from tqdm import tqdm
 from scanners import TrivyScanner, GrypeScanner, SnykScanner
 from reporters import ExcelReporter, JsonReporter, PdfReporter
 from reporters.sbom_reporter import SbomReporter
+from reporters.diff_reporter import DiffReporter
 from repo_manager import RepoManager
 from scan_history import ScanHistory
 
@@ -66,6 +67,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Skip targets already scanned at the same commit (requires --history)")
     p.add_argument("--sbom", choices=["cyclonedx", "spdx"], const="cyclonedx", nargs="?",
                     help="Generate SBOM using Trivy (cyclonedx or spdx)")
+    p.add_argument("--diff", action="store_true",
+                    help="Diff against last scan from history (requires --history)")
     return p.parse_args(argv)
 
 
@@ -172,6 +175,14 @@ def main(argv: list[str] | None = None) -> None:
         name = reporter.__class__.__name__.replace("Reporter", "").lower()
         out = reporter.generate(all_results, name="vulnerability_report")
         print(f"report ({name}): {out}")
+
+    if args.diff and history:
+        diffs = DiffReporter(output_dir=args.output_dir).compute(all_results, repo_map, args.history_db)
+        if diffs:
+            print("diff:")
+            DiffReporter(output_dir=args.output_dir).print_summary(diffs)
+            out = DiffReporter(output_dir=args.output_dir).generate(diffs, name="vulnerability_report-diff")
+            print(f"report (diff): {out}")
 
     if args.sbom and args.local:
         sbom_gen = SbomReporter(output_dir=args.output_dir)
