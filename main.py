@@ -11,6 +11,7 @@ from reporters import ExcelReporter, JsonReporter, PdfReporter, HtmlReporter, Sa
 from reporters.sbom_reporter import SbomReporter
 from reporters.diff_reporter import DiffReporter
 from reporters.license_reporter import LicenseReporter
+from reporters.dep_tree_reporter import DependencyTreeReporter
 from repo_manager import RepoManager
 from scan_history import ScanHistory
 
@@ -79,6 +80,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Scan for software licenses using Trivy (requires --local)")
     p.add_argument("--license-policy", nargs="*", default=None,
                     help="License policy rules: 'allow=MIT,Apache-2.0' or 'deny=GPL-3.0,AGPL-3.0'")
+    p.add_argument("--dep-tree", action="store_true",
+                    help="Export full dependency tree (all packages, not just vulnerable ones)")
     return p.parse_args(argv)
 
 
@@ -201,6 +204,23 @@ def main(argv: list[str] | None = None) -> None:
                 out = sbom_gen.generate_for_target(target, name=f"vulnerability_report-{Path(target).name}", fmt=args.sbom)
                 if out:
                     print(f"sbom ({args.sbom}): {out}")
+
+    if args.dep_tree and args.local:
+        print("\nbuilding dependency tree...")
+        dep_reporter = DependencyTreeReporter(output_dir=args.output_dir)
+        dep_results = []
+        for target in scan_targets:
+            if Path(target).is_dir():
+                dr = dep_reporter.scan_target(target)
+                if dr:
+                    dep_results.append(dr)
+
+        if dep_results:
+            dep_reporter.print_summary(dep_results)
+            out_json = dep_reporter.generate(dep_results, name="dependency_tree")
+            print(f"report (dep-tree json): {out_json}")
+            out_csv = dep_reporter.generate_csv(dep_results, name="dependency_tree")
+            print(f"report (dep-tree csv): {out_csv}")
 
     license_violations = False
     if args.license and args.local:
