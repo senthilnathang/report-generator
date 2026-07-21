@@ -6,9 +6,11 @@ from pathlib import Path
 from tqdm import tqdm
 
 from scanners import TrivyScanner, GrypeScanner, SnykScanner
+from scanners.license_scanner import LicenseScanner
 from reporters import ExcelReporter, JsonReporter, PdfReporter, HtmlReporter, SarifReporter
 from reporters.sbom_reporter import SbomReporter
 from reporters.diff_reporter import DiffReporter
+from reporters.license_reporter import LicenseReporter
 from repo_manager import RepoManager
 from scan_history import ScanHistory
 
@@ -73,6 +75,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Diff against last scan from history (requires --history)")
     p.add_argument("--fail-on", choices=["critical", "high", "medium", "low"], default=None,
                     help="Exit non-zero if any vulnerabilities at this severity or higher are found")
+    p.add_argument("--license", action="store_true",
+                    help="Scan for software licenses using Trivy (requires --local)")
+    p.add_argument("--license-policy", nargs="*", default=None,
+                    help="License policy rules: 'allow=MIT,Apache-2.0' or 'deny=GPL-3.0,AGPL-3.0'")
     return p.parse_args(argv)
 
 
@@ -196,9 +202,34 @@ def main(argv: list[str] | None = None) -> None:
                 if out:
                     print(f"sbom ({args.sbom}): {out}")
 
+    license_violations = False
+    if args.license and args.local:
+        print("\nscanning licenses...")
+        policy = _parse_license_policy(args.license_policy)
+        lic_scanner = LicenseScanner()
+        lic_results = []
+        for target in scan_targets:
+            if Path(target).is_dir():
+                lr = lic_scanner.scan(target)
+                if lr.licenses or lr.errors:
+                    lic_results.append(lr)
+
+        if lic_results:
+            lic_reporter = LicenseReporter(output_dir=args.output_dir, policy=policy)
+            out = lic_reporter.generate(lic_results, name="license_report")
+            print(f"report (license): {out}")
+            lic_reporter.print_summary(lic_results)
+            violations = lic_reporter.print_violations(lic_results)
+            if violations:
+                license_violations = True
+                print(f"\nlicense policy violations: {len(violations)}")
+        else:
+            print("  no license data found")
+
     print()
     print(f"summary: {total_scans - skipped} scans, {total_vulns} vulnerabilities, {failed} failures")
 
+    exit_code = 0
     if args.fail_on:
         severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         threshold = severity_rank[args.fail_on]
@@ -208,7 +239,35 @@ def main(argv: list[str] | None = None) -> None:
                 rank = severity_rank.get(sev.lower(), 99)
                 if rank <= threshold:
                     print(f"\nfail-on {args.fail_on}: found {sev} vulnerability {v.id} in {r.repo} ({v.package})")
-                    sys.exit(1)
+                    exit_code = 1
+
+    if license_violations:
+        exit_code = 1
+
+    if exit_code:
+        sys.exit(exit_code)
+
+
+def _parse_license_policy(rules: list[str] | None) -> dict[str, str]:
+    """Parse --license-policy args into a {license_name: action} dict.
+
+    Example: --license-policy "allow=MIT,Apache-2.0" "deny=GPL-3.0"
+    """
+    policy: dict[str, str] = {}
+    if not rules:
+        return policy
+    for rule in rules:
+        if "=" not in rule:
+            continue
+        action, names = rule.split("=", 1)
+        action = action.strip().lower()
+        if action not in ("allow", "deny"):
+            continue
+        for name in names.split(","):
+            name = name.strip()
+            if name:
+                policy[name] = action
+    return policy
 
 
 if __name__ == "__main__":

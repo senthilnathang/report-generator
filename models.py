@@ -15,12 +15,24 @@ class Vulnerability:
 
 
 @dataclass
+class LicenseFinding:
+    name: str
+    severity: str
+    category: str
+    package: str
+    file_path: str
+    confidence: float
+    link: str = ""
+
+
+@dataclass
 class ScanResult:
     repo: str
     scanner: str
     scan_date: str
     vulnerabilities: list[Vulnerability] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    licenses: list[LicenseFinding] = field(default_factory=list)
 
     @property
     def summary(self) -> dict[str, int]:
@@ -33,7 +45,15 @@ class ScanResult:
                 counts["UNKNOWN"] += 1
         return counts
 
+    @property
+    def license_summary(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for l in self.licenses:
+            counts[l.name] = counts.get(l.name, 0) + 1
+        return counts
+
     def to_dict(self) -> dict:
         d = asdict(self)
         d["summary"] = self.summary
+        d["license_summary"] = self.license_summary
         return d
