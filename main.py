@@ -6,7 +6,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from scanners import TrivyScanner, GrypeScanner, SnykScanner
-from reporters import ExcelReporter, JsonReporter, PdfReporter
+from reporters import ExcelReporter, JsonReporter, PdfReporter, HtmlReporter, SarifReporter
 from reporters.sbom_reporter import SbomReporter
 from reporters.diff_reporter import DiffReporter
 from repo_manager import RepoManager
@@ -22,6 +22,8 @@ REPORTER_MAP = {
     "excel": ExcelReporter,
     "json": JsonReporter,
     "pdf": PdfReporter,
+    "html": HtmlReporter,
+    "sarif": SarifReporter,
 }
 
 
@@ -69,6 +71,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Generate SBOM using Trivy (cyclonedx or spdx)")
     p.add_argument("--diff", action="store_true",
                     help="Diff against last scan from history (requires --history)")
+    p.add_argument("--fail-on", choices=["critical", "high", "medium", "low"], default=None,
+                    help="Exit non-zero if any vulnerabilities at this severity or higher are found")
     return p.parse_args(argv)
 
 
@@ -194,6 +198,17 @@ def main(argv: list[str] | None = None) -> None:
 
     print()
     print(f"summary: {total_scans - skipped} scans, {total_vulns} vulnerabilities, {failed} failures")
+
+    if args.fail_on:
+        severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        threshold = severity_rank[args.fail_on]
+        for r in all_results:
+            for v in r.vulnerabilities:
+                sev = v.severity.upper()
+                rank = severity_rank.get(sev.lower(), 99)
+                if rank <= threshold:
+                    print(f"\nfail-on {args.fail_on}: found {sev} vulnerability {v.id} in {r.repo} ({v.package})")
+                    sys.exit(1)
 
 
 if __name__ == "__main__":

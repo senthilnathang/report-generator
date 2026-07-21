@@ -39,16 +39,20 @@ pub enum Format {
     Json,
     Excel,
     Pdf,
+    Html,
+    Sarif,
 }
 
 impl Format {
-    pub const ALL: [Format; 3] = [Format::Json, Format::Excel, Format::Pdf];
+    pub const ALL: [Format; 5] = [Format::Json, Format::Excel, Format::Pdf, Format::Html, Format::Sarif];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Format::Json => "json",
             Format::Excel => "excel",
             Format::Pdf => "pdf",
+            Format::Html => "html",
+            Format::Sarif => "sarif",
         }
     }
 }

@@ -110,16 +110,17 @@ fn render_format_panel(f: &mut Frame, app: &App, area: Rect) {
         ])));
     }
 
+    let n = Format::ALL.len();
     let inner = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(vec![Constraint::Ratio(1, 3); 3])
+        .constraints(vec![Constraint::Ratio(1, n as u32); n])
         .split(area);
     for (i, cell) in cells.into_iter().enumerate() {
         f.render_widget(cell, inner[i]);
     }
 
     let block = Block::default()
-        .title(" Output Formats (space to toggle) ")
+        .title(" Output Formats (f to toggle) ")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
     f.render_widget(block, area);
