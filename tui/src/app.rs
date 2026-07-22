@@ -1,402 +1,194 @@
 use std::path::Path;
-use std::process::Stdio;
 
-use color_eyre::eyre::{Context, Result};
-use serde::Deserialize;
-use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
+use color_eyre::eyre::Result;
+use scan_tui::{self, read_repo_list, Format, OptionField, Scanner};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Dashboard,
-    Scanning,
-    Results,
-}
+pub enum Mode { Dashboard, EditingContainer, Scanning, Results }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Scanner {
-    Trivy,
-    Grype,
-    Snyk,
-}
+pub enum Panel { Scanners, Formats, Options }
 
-impl Scanner {
-    pub const ALL: [Scanner; 3] = [Scanner::Trivy, Scanner::Grype, Scanner::Snyk];
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Scanner::Trivy => "trivy",
-            Scanner::Grype => "grype",
-            Scanner::Snyk => "snyk",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Format {
-    Json,
-    Excel,
-    Pdf,
-    Html,
-    Sarif,
-}
-
-impl Format {
-    pub const ALL: [Format; 5] = [Format::Json, Format::Excel, Format::Pdf, Format::Html, Format::Sarif];
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Format::Json => "json",
-            Format::Excel => "excel",
-            Format::Pdf => "pdf",
-            Format::Html => "html",
-            Format::Sarif => "sarif",
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct ConfigRepos {
-    url: String,
-    branch: Option<String>,
-    scan_mode: Option<String>,
-    commit: Option<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct Config {
-    repositories: Vec<ConfigRepos>,
-}
-
-#[derive(Clone)]
-pub struct ScanResult {
-    pub repo: String,
-    pub scanner: String,
-    pub vulns: usize,
-    pub errors: Vec<String>,
-    #[allow(dead_code)]
-    pub scan_date: String,
-    pub critical: usize,
-    pub high: usize,
-    pub medium: usize,
-    pub low: usize,
-}
-
-impl ScanResult {
-    fn from_json(value: &Value) -> Option<Self> {
-        let repo = value.get("repo")?.as_str()?.to_string();
-        let scanner = value.get("scanner")?.as_str()?.to_string();
-        let scan_date = value.get("scan_date")?.as_str()?.to_string();
-        let vulns = value.get("vulnerabilities")?.as_array()?;
-        let errors: Vec<String> = value
-            .get("errors")?
-            .as_array()?
-            .iter()
-            .filter_map(|v: &Value| v.as_str().map(String::from))
-            .collect();
-        let summary = value.get("summary")?;
-        let critical = summary.get("CRITICAL").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let high = summary.get("HIGH").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let medium = summary.get("MEDIUM").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let low = summary.get("LOW").and_then(Value::as_u64).unwrap_or(0) as usize;
-
-        Some(ScanResult {
-            repo,
-            scanner,
-            vulns: vulns.len(),
-            errors,
-            scan_date,
-            critical,
-            high,
-            medium,
-            low,
-        })
-    }
-}
-
-pub struct App {
+pub struct TuiApp {
     pub mode: Mode,
+    pub panel_focus: Panel,
+    pub scanner_cursor: usize,
+    pub format_cursor: usize,
+    pub option_cursor: usize,
+    pub scan: scan_tui::ScanConfig,
+    pub handle: Option<scan_tui::ScanHandle>,
     pub repos: Vec<String>,
-    pub scanners: Vec<Scanner>,
-    pub formats: Vec<Format>,
-    pub log_lines: Vec<String>,
-    pub scan_results: Vec<ScanResult>,
-    pub scan_pid: Option<u32>,
-    pub result_file: String,
     pub status_message: String,
-    pub total_critical: usize,
-    pub total_high: usize,
-    pub total_medium: usize,
-    pub total_low: usize,
-    pub total_vulns: usize,
-    pub total_targets: usize,
-    pub completed_targets: usize,
-    pub should_quit: bool,
-    pub diff_enabled: bool,
-    pub dep_tree_enabled: bool,
-    pub license_enabled: bool,
-    pub health_report_enabled: bool,
-    pub outdated_enabled: bool,
-    pub fail_on_index: usize,
+    pub log_lines: Vec<String>,
     pub log_scroll: usize,
-    pub     scan_timeout_secs: u64,
-    scan_start: Option<std::time::Instant>,
-    #[allow(dead_code)]
-    pub list_index: usize,
-    pub scanner_index: usize,
-    pub format_index: usize,
-    log_rx: Option<mpsc::Receiver<String>>,
-    child: Option<Child>,
+    pub should_quit: bool,
+    pub total_critical: usize,   pub total_high: usize,
+    pub total_medium: usize,     pub total_low: usize,
+    pub total_vulns: usize,
+    pub completed_targets: usize,
+    pub total_targets: usize,
+    pub scan_results: Vec<scan_tui::ScanResult>,
 }
 
-pub const FAIL_ON_LEVELS: [&str; 5] = ["none", "critical", "high", "medium", "low"];
-
-impl App {
+impl TuiApp {
     pub fn new(project_root: &Path) -> Result<Self> {
         let repos = read_repo_list(&project_root.join("repolist.txt"))?;
-        let total_targets = repos.len() * 3; // worst-case: all 3 scanners
-        Ok(App {
+        Ok(Self {
             mode: Mode::Dashboard,
+            panel_focus: Panel::Scanners,
+            scanner_cursor: 0, format_cursor: 0, option_cursor: 0,
+            scan: scan_tui::ScanConfig::default(),
+            handle: None,
             repos,
-            scanners: vec![Scanner::Trivy],
-            formats: vec![Format::Json],
-            log_lines: Vec::new(),
-            scan_results: Vec::new(),
-            scan_pid: None,
-            result_file: project_root.join("reports").to_string_lossy().to_string(),
             status_message: String::new(),
-            total_critical: 0,
-            total_high: 0,
-            total_medium: 0,
-            total_low: 0,
-            total_vulns: 0,
-            total_targets,
-            completed_targets: 0,
-            should_quit: false,
-            diff_enabled: false,
-            dep_tree_enabled: false,
-            license_enabled: false,
-            health_report_enabled: false,
-            outdated_enabled: false,
-            fail_on_index: 0,
-            log_scroll: 0,
-            scan_timeout_secs: 600,
-            scan_start: None,
-            list_index: 0,
-            scanner_index: 0,
-            format_index: 0,
-            log_rx: None,
-            child: None,
+            log_lines: Vec::new(), log_scroll: 0, should_quit: false,
+            total_critical: 0, total_high: 0, total_medium: 0, total_low: 0,
+            total_vulns: 0, completed_targets: 0, total_targets: 0,
+            scan_results: Vec::new(),
         })
     }
 
     pub fn toggle_scanner(&mut self, idx: usize) {
-        if idx >= Scanner::ALL.len() {
-            return;
-        }
-        let scanner = Scanner::ALL[idx];
-        if let Some(pos) = self.scanners.iter().position(|s| *s == scanner) {
-            if self.scanners.len() > 1 {
-                self.scanners.remove(pos);
-            }
-        } else {
-            self.scanners.push(scanner);
+        if idx >= Scanner::ALL.len() { return; }
+        let s = Scanner::ALL[idx];
+        if let Some(p) = self.scan.scanners.iter().position(|x| *x == s) {
+            if self.scan.scanners.len() > 1 { self.scan.scanners.remove(p); }
+        } else { self.scan.scanners.push(s); }
+    }
+
+    pub fn toggle_format(&mut self, idx: usize) {
+        if idx >= Format::ALL.len() { return; }
+        let f = Format::ALL[idx];
+        if let Some(p) = self.scan.formats.iter().position(|x| *x == f) {
+            if self.scan.formats.len() > 1 { self.scan.formats.remove(p); }
+        } else { self.scan.formats.push(f); }
+    }
+
+    pub fn toggle_option(&mut self, f: OptionField) {
+        let o = &mut self.scan.opts;
+        match f {
+            OptionField::Diff => o.diff ^= true,
+            OptionField::DepTree => o.dep_tree ^= true,
+            OptionField::License => o.license ^= true,
+            OptionField::Health => o.health ^= true,
+            OptionField::Outdated => o.outdated ^= true,
+            OptionField::DepGraph => o.dep_graph ^= true,
+            OptionField::FixRecs => o.fix_recs ^= true,
+            OptionField::Epss => o.epss ^= true,
+            OptionField::RiskScore => o.risk_score ^= true,
+            OptionField::Scorecard => o.scorecard ^= true,
+            OptionField::SbomDiff => o.sbom_diff ^= true,
+            OptionField::Suppressions => o.suppressions ^= true,
+            OptionField::Compliance => o.compliance ^= true,
+            OptionField::RegressionCheck => o.regression ^= true,
         }
     }
 
-    #[allow(dead_code)]
-    pub fn toggle_format(&mut self, idx: usize) {
-        if idx >= Format::ALL.len() {
-            return;
+    pub fn is_option_enabled(&self, f: OptionField) -> bool {
+        let o = &self.scan.opts;
+        match f {
+            OptionField::Diff => o.diff,           OptionField::DepTree => o.dep_tree,
+            OptionField::License => o.license,      OptionField::Health => o.health,
+            OptionField::Outdated => o.outdated,    OptionField::DepGraph => o.dep_graph,
+            OptionField::FixRecs => o.fix_recs,
+            OptionField::Epss => o.epss,            OptionField::RiskScore => o.risk_score,
+            OptionField::Scorecard => o.scorecard,  OptionField::SbomDiff => o.sbom_diff,
+            OptionField::Suppressions => o.suppressions,
+            OptionField::Compliance => o.compliance,
+            OptionField::RegressionCheck => o.regression,
         }
-        let fmt = Format::ALL[idx];
-        if let Some(pos) = self.formats.iter().position(|f| *f == fmt) {
-            if self.formats.len() > 1 {
-                self.formats.remove(pos);
-            }
-        } else {
-            self.formats.push(fmt);
-        }
+    }
+
+    pub fn options_enabled_count(&self) -> usize {
+        let o = &self.scan.opts;
+        [o.diff, o.dep_tree, o.license, o.health, o.outdated, o.dep_graph, o.fix_recs,
+         o.epss, o.risk_score, o.scorecard, o.sbom_diff, o.suppressions, o.compliance, o.regression]
+            .iter().filter(|&&x| x).count()
     }
 
     pub fn start_scan(&mut self, project_root: &Path) -> Result<()> {
-        let scanner_args: Vec<&str> = self.scanners.iter().map(|s| s.as_str()).collect();
-        let format_args: Vec<&str> = self.formats.iter().map(|f| f.as_str()).collect();
-        self.total_targets = self.repos.len() * self.scanners.len();
+        let mut cmd = scan_tui::build_scan_cmd(&self.scan, &self.repos, project_root)?;
+        let mut handle = scan_tui::spawn_scan(&mut cmd)?;
+        handle.total_targets = self.repos.len() * self.scan.scanners.len();
+        self.total_targets = handle.total_targets;
         self.completed_targets = 0;
-
-        let mut cmd = Command::new("python3");
-        cmd.arg("main.py")
-            .arg("-i")
-            .arg("repolist.txt")
-            .arg("-s")
-            .args(&scanner_args)
-            .arg("-f")
-            .args(&format_args)
-            .arg("-o")
-            .arg(self.result_file.as_str())
-            .arg("--local")
-            .arg("--sync")
-            .arg("--history");
-        if self.diff_enabled {
-            cmd.arg("--diff");
-        }
-        if self.dep_tree_enabled {
-            cmd.arg("--dep-tree");
-        }
-        if self.license_enabled {
-            cmd.arg("--license");
-        }
-        if self.health_report_enabled {
-            cmd.arg("--health-report");
-        }
-        if self.outdated_enabled {
-            cmd.arg("--outdated");
-        }
-        if self.fail_on_index > 0 {
-            cmd.arg("--fail-on");
-            cmd.arg(FAIL_ON_LEVELS[self.fail_on_index]);
-        }
-        cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .current_dir(project_root);
-
-        let mut child = cmd.spawn().wrap_err("failed to spawn python3")?;
-        self.scan_pid = child.id();
-        let (tx, rx) = mpsc::channel(256);
-        self.log_rx = Some(rx);
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        let tx1 = tx.clone();
-        if let Some(stdout) = stdout {
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    if tx1.send(line).await.is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-
-        if let Some(stderr) = stderr {
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    if tx.send(line).await.is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-
-        self.child = Some(child);
-        self.scan_start = Some(std::time::Instant::now());
+        self.handle = Some(handle);
         self.mode = Mode::Scanning;
         self.log_lines.clear();
         self.status_message = "scanning...".to_string();
         Ok(())
     }
 
+    fn sync_from_handle(&mut self) {
+        if let Some(h) = &self.handle {
+            self.scan_results = h.scan_results.clone();
+            self.total_critical = h.total_critical;
+            self.total_high = h.total_high;
+            self.total_medium = h.total_medium;
+            self.total_low = h.total_low;
+            self.total_vulns = h.total_vulns;
+            self.completed_targets = h.completed_targets;
+            self.total_targets = h.total_targets;
+        }
+    }
+
     pub fn poll_logs(&mut self) {
-        if let Some(rx) = &mut self.log_rx {
-            while let Ok(line) = rx.try_recv() {
-                self.log_lines.push(line);
-            }
-            if self.log_lines.len() > 10_000 {
-                self.log_lines.drain(0..self.log_lines.len() - 10_000);
+        if let Some(h) = &mut self.handle {
+            if let Some(rx) = &mut h.log_rx {
+                while let Ok(l) = rx.try_recv() { self.log_lines.push(l); }
+                if self.log_lines.len() > 10_000 {
+                    self.log_lines.drain(0..self.log_lines.len() - 10_000);
+                }
             }
         }
     }
 
     pub async fn kill_child(&mut self) {
-        if let Some(pid) = self.scan_pid {
-            // SIGTERM first
-            let _ = tokio::process::Command::new("kill")
-                .args(["-15", &pid.to_string()])
-                .spawn();
-            // brief wait, then SIGKILL
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let _ = tokio::process::Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .spawn();
+        if let Some(h) = &self.handle {
+            if let Some(ref child) = h.child {
+                if let Some(pid) = child.id() {
+                    let _ = tokio::process::Command::new("kill").args(["-15", &pid.to_string()]).spawn();
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let _ = tokio::process::Command::new("kill").args(["-9", &pid.to_string()]).spawn();
+                }
+            }
         }
-        self.scan_pid = None;
-        self.child = None;
+        if let Some(h) = &mut self.handle { h.child = None; }
+        self.mode = Mode::Dashboard;
     }
 
     pub async fn poll_child(&mut self) {
-        if let Some(start) = self.scan_start {
-            if start.elapsed().as_secs() > self.scan_timeout_secs {
-                self.status_message = "scan timed out".to_string();
-                self.kill_child().await;
-                self.mode = Mode::Results;
-                return;
+        if let Some(h) = &mut self.handle {
+            if let Some(start) = h.scan_start {
+                if start.elapsed().as_secs() > 600 {
+                    self.status_message = "timed out".to_string();
+                    self.handle = None;
+                    self.mode = Mode::Results;
+                    return;
+                }
             }
-        }
-        if let Some(mut child) = self.child.take() {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    self.scan_pid = None;
-                    self.scan_start = None;
-                    if status.success() {
-                        self.status_message = "scan completed successfully".to_string();
-                        self.load_results();
+            if let Some(mut child) = h.child.take() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        h.child = None;
+                        h.scan_start = None;
+                        if status.success() {
+                            h.load_results("reports");
+                            self.sync_from_handle();
+                            self.status_message = "scan complete".to_string();
+                        } else {
+                            self.status_message = format!("failed: {:?}", status.code());
+                        }
                         self.mode = Mode::Results;
-                    } else {
-                        self.status_message =
-                            format!("scan failed with exit code: {:?}", status.code());
+                    }
+                    Ok(None) => { h.child = Some(child); }
+                    Err(e) => {
+                        h.scan_start = None;
+                        self.status_message = format!("error: {e}");
                         self.mode = Mode::Results;
                     }
                 }
-                Ok(None) => {
-                    self.child = Some(child);
-                }
-                Err(e) => {
-                    self.scan_start = None;
-                    self.status_message = format!("scan error: {e}");
-                    self.mode = Mode::Results;
-                }
             }
         }
     }
-
-    fn load_results(&mut self) {
-        let path = Path::new(&self.result_file).join("vulnerability_report.json");
-        if !path.exists() {
-            return;
-        }
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let values: Vec<Value> = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        self.scan_results = values.iter().filter_map(|v| ScanResult::from_json(v)).collect();
-        self.total_critical = self.scan_results.iter().map(|r| r.critical).sum();
-        self.total_high = self.scan_results.iter().map(|r| r.high).sum();
-        self.total_medium = self.scan_results.iter().map(|r| r.medium).sum();
-        self.total_low = self.scan_results.iter().map(|r| r.low).sum();
-        self.total_vulns = self.scan_results.iter().map(|r| r.vulns).sum();
-        self.completed_targets = self.scan_results.len();
-    }
-}
-
-fn read_repo_list(path: &Path) -> Result<Vec<String>> {
-    let content = std::fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    let repos: Vec<String> = content
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(String::from)
-        .collect();
-    Ok(repos)
 }

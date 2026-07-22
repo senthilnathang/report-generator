@@ -1,0 +1,62 @@
+name: vulnerability-scan
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    - cron: '0 6 * * 1'  # weekly monday
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -r requirements.txt
+
+      - name: install trivy
+        run: |
+          sudo apt-get update && sudo apt-get install -y wget apt-transport-https
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update && sudo apt-get install -y trivy
+
+      - name: install grype
+        uses: anchore/scan-action@v4
+        with:
+          only-fixed: true
+
+      - name: install semgrep
+        run: pip install semgrep
+
+      - name: run vulnerability scan
+        run: |
+          . .venv/bin/activate
+          python main.py --local \
+            --scanners trivy grype semgrep bandit gitleaks \
+            --dep-tree --license --outdated \
+            --sarif \
+            --output-dir reports
+
+      - name: upload sarif to github code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/results.sarif
+          category: scan-tui
+
+      - name: upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulnerability-reports
+          path: reports/

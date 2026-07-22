@@ -1,0 +1,37 @@
+stages:
+  - scan
+
+vulnerability-scan:
+  stage: scan
+  image: python:3.12-slim
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  before_script:
+    - apt-get update && apt-get install -y curl git
+    - python -m venv .venv
+    - . .venv/bin/activate
+    - pip install -r requirements.txt
+    # install trivy
+    - curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh
+    - ./bin/trivy --version
+  script:
+    - . .venv/bin/activate
+    # fetch main for diff (optional)
+    - git fetch origin $CI_DEFAULT_BRANCH
+    - |
+      python main.py \
+        --local \
+        --scanners trivy grype semgrep bandit gitleaks \
+        --dep-tree --license --outdated \
+        --sarif \
+        --diff \
+        --output-dir reports
+    - echo "Reports generated in reports/"
+  artifacts:
+    paths:
+      - reports/
+    reports:
+      sarif: reports/results.sarif
+    expire_in: 30 days

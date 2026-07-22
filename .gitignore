@@ -6,3 +6,4 @@ __pycache__/
 reports/
 reports_*/
 tui/target/
+gui/target/

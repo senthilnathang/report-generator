@@ -12,6 +12,10 @@ class Vulnerability:
     severity: str
     type: str
     description: str = ""
+    epss: Optional[float] = None
+    epss_percentile: Optional[float] = None
+    risk_score: Optional[float] = None
+    risk_level: str = ""
 
 
 @dataclass

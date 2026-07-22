@@ -1,0 +1,43 @@
+frameworks:
+  - id: pci-dss
+    version: "4.0"
+    controls:
+      - id: "6.2"
+        name: Timely patching
+        description: Ensure all system components are protected from known vulnerabilities
+        rules:
+          - severity: CRITICAL
+          - severity: HIGH
+      - id: "6.3"
+        name: Secure development
+        description: Remove development artifacts, secrets, and test code before production
+        rules:
+          - type: secret
+      - id: "7.3"
+        name: Access control
+        description: Restrict access to system components and cardholder data
+        rules:
+          - type: sast
+            severity: HIGH
+
+  - id: soc2
+    controls:
+      - id: CC6.1
+        name: Logical and physical access controls
+        rules:
+          - type: secret
+      - id: CC7.1
+        name: System monitoring
+        rules:
+          - severity: CRITICAL
+
+  - id: hipaa
+    controls:
+      - id: "164.312(a)(1)"
+        name: Access control
+        rules:
+          - type: secret
+      - id: "164.312(c)(1)"
+        name: Integrity controls
+        rules:
+          - type: sast

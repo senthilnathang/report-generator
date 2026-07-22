@@ -1,0 +1,10 @@
+[package]
+name = "scan-gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+egui = "0.35"
+eframe = "0.35"
+tokio = { version = "1", features = ["full"] }
+scan-tui = { path = "../tui" }
